@@ -1,0 +1,8 @@
+[package]
+name = "mine_proxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+flate2 = "1.0.30"
+tokio = { version = "1.38.1", features = ["full"] }
