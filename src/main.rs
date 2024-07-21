@@ -214,28 +214,44 @@ impl Proxy {
 #[allow(dead_code)]
 #[allow(unused_imports)]
 mod tests {
+    use std::io::Write;
+
     use tokio::io::AsyncReadExt;
 
-    use crate::types::var_int::VarInt;
-
-    #[tokio::test]
-    async fn len_test() {
-        let arr = vec![0x00, 0x01, 0x02, 0x03];
-        assert_eq!(arr[1..2 + 1], [0x01, 0x02]);
-    }
-
-    #[tokio::test]
-    async fn stupid_test() {
-        let mut test: &[u8] = &[0x00, 0x01];
-
-        assert_ne!(test.read_u8().await.unwrap(), test.read_u8().await.unwrap());
-    }
+    use crate::{
+        packet::{packet::Packet, packet_builder::PacketBuilder},
+        types::var_int::VarInt,
+    };
 
     #[tokio::test]
     async fn stupid_test2() {
         let mut test: &[u8] = &[0x01, 0x02, 0x03, 0x04];
         test.read_u8().await.unwrap();
         assert_eq!(test, &[0x02, 0x03, 0x04]);
+    }
+
+    #[tokio::test]
+    async fn stupid_test() {
+        let mut test: &[u8] = &[0x01, 0x02, 0x03, 0x04];
+        let mut test2 = Vec::new();
+        test2.write_all(&mut test).unwrap();
+        assert_eq!(test, &test2);
+    }
+
+    #[tokio::test]
+    async fn packet_compress_test() {
+        let packet = PacketBuilder::new(VarInt(11))
+            .string("ASJBIBDIVBDIBIUBWRUWBRIWUBUIUWFDBVI".to_string())
+            .int(23312313)
+            .var_int(VarInt(1231231))
+            .build();
+
+        let mut buf = Vec::new();
+        packet.write(&mut buf, Some(1)).await.unwrap();
+
+        let mut stream = &buf[..];
+        let packet_new = Packet::read(&mut stream, Some(1)).await.unwrap();
+        assert_eq!(packet.data, packet_new.data);
     }
 
     #[tokio::test]

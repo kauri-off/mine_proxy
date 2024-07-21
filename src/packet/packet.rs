@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 use flate2::{
     write::{ZlibDecoder, ZlibEncoder},
@@ -30,15 +30,20 @@ impl Packet {
 
                 match data_lenght.0 {
                     0 => stream.to_vec(),
-                    _ => Packet::decompress_data(stream).await?,
+                    _ => {
+                        let dcd = Packet::decompress_data(stream).await?;
+                        let cd = Packet::compress_data(&dcd).await?;
+                        dbg!(stream.len(), cd.len());
+                        dcd
+                    }
                 }
             }
             None => body,
         };
         let mut stream = &body[..];
-        let (packet_id, offset) = VarInt::read(&mut stream).await?;
+        let (packet_id, _offset) = VarInt::read(&mut stream).await?;
 
-        let data = body[offset..].to_vec();
+        let data = stream.to_vec();
 
         Ok(Packet { packet_id, data })
     }
@@ -83,14 +88,14 @@ impl Packet {
     }
 
     async fn compress_data(data: &[u8]) -> io::Result<Vec<u8>> {
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(data)?;
-        encoder.finish()
+        let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
+        e.write_all(data)?;
+        e.finish()
     }
 
     async fn decompress_data(data: &[u8]) -> io::Result<Vec<u8>> {
-        let mut decoder = ZlibDecoder::new(Vec::new());
-        decoder.write_all(data)?;
-        decoder.finish()
+        let mut d = ZlibDecoder::new(Vec::new());
+        d.write_all(data)?;
+        d.finish()
     }
 }
