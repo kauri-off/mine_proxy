@@ -2,15 +2,13 @@ use std::io;
 
 use crate::{
     packet::{
-        packet::{Packet, UncompressedPacket},
-        packet_builder::PacketBuilder,
-        packet_reader::PacketReader,
+        packet::UncompressedPacket, packet_builder::PacketBuilder, packet_reader::PacketReader,
     },
     types::var_int::VarInt,
 };
 
 pub trait PacketActions: Sized {
-    fn serialize(self) -> Packet;
+    fn serialize(self) -> UncompressedPacket;
     async fn deserialize(packet: &UncompressedPacket) -> io::Result<Self>;
 }
 
@@ -25,15 +23,13 @@ pub struct Handshake {
 }
 
 impl PacketActions for Handshake {
-    fn serialize(self) -> Packet {
-        Packet::UnCompressed(
-            PacketBuilder::new(self.packet_id)
-                .write_var_int(self.protocol_version)
-                .write_string(self.server_address)
-                .write_int(self.server_port)
-                .write_var_int(self.next_state)
-                .build(),
-        )
+    fn serialize(self) -> UncompressedPacket {
+        PacketBuilder::new(self.packet_id)
+            .write_var_int(self.protocol_version)
+            .write_string(self.server_address)
+            .write_int(self.server_port)
+            .write_var_int(self.next_state)
+            .build()
     }
 
     async fn deserialize(packet: &UncompressedPacket) -> io::Result<Self> {
@@ -60,12 +56,10 @@ pub struct SetCompression {
 }
 
 impl PacketActions for SetCompression {
-    fn serialize(self) -> Packet {
-        Packet::UnCompressed(
-            PacketBuilder::new(self.packet_id)
-                .write_var_int(self.threshold)
-                .build(),
-        )
+    fn serialize(self) -> UncompressedPacket {
+        PacketBuilder::new(self.packet_id)
+            .write_var_int(self.threshold)
+            .build()
     }
 
     async fn deserialize(packet: &UncompressedPacket) -> io::Result<Self> {
@@ -85,12 +79,10 @@ pub struct ChatCommand {
 }
 
 impl PacketActions for ChatCommand {
-    fn serialize(self) -> Packet {
-        Packet::UnCompressed(
-            PacketBuilder::new(self.packet_id)
-                .write_string(self.command)
-                .build(),
-        )
+    fn serialize(self) -> UncompressedPacket {
+        PacketBuilder::new(self.packet_id)
+            .write_string(self.command)
+            .build()
     }
 
     async fn deserialize(packet: &UncompressedPacket) -> io::Result<Self> {
@@ -116,7 +108,7 @@ pub struct ChatMessage {
 }
 
 impl PacketActions for ChatMessage {
-    fn serialize(self) -> Packet {
+    fn serialize(self) -> UncompressedPacket {
         let packet = PacketBuilder::new(self.packet_id)
             .write_string(self.message)
             .write_int(self.timestamp)
@@ -128,12 +120,10 @@ impl PacketActions for ChatMessage {
             None => packet,
         };
 
-        Packet::UnCompressed(
-            packet
-                .write_var_int(self.message_count)
-                .write_buffer(&self.acknowledged)
-                .build(),
-        )
+        packet
+            .write_var_int(self.message_count)
+            .write_buffer(&self.acknowledged)
+            .build()
     }
 
     async fn deserialize(packet: &UncompressedPacket) -> io::Result<Self> {
@@ -168,5 +158,28 @@ impl PacketActions for ChatMessage {
             message_count,
             acknowledged,
         })
+    }
+}
+
+/// PacketID 0x00
+pub struct Status {
+    pub packet_id: VarInt,
+    pub status: String,
+}
+
+impl PacketActions for Status {
+    fn serialize(self) -> UncompressedPacket {
+        PacketBuilder::new(self.packet_id.clone())
+            .write_string(self.status)
+            .build()
+    }
+
+    async fn deserialize(packet: &UncompressedPacket) -> io::Result<Self> {
+        let mut packet_reader = PacketReader::new(packet);
+        let packet_id = packet.packet_id.clone();
+
+        let status = packet_reader.read_string().await?;
+
+        Ok(Status { packet_id, status })
     }
 }

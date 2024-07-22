@@ -181,7 +181,7 @@ impl Packet {
     }
 
     pub async fn compress_data(data: &[u8]) -> io::Result<Vec<u8>> {
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(9));
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
         encoder.write_all(data)?;
         let compressed_data = encoder.finish()?;
         Ok(compressed_data)

@@ -1,21 +1,21 @@
 use std::io::{self, Error};
 
-use packet::{
-    packet::{Packet, UncompressedPacket},
-    packet_reader::PacketReader,
-};
-use packets::packets::{ChatCommand, Handshake, PacketActions, SetCompression};
-use tokio::net::{
-    tcp::{OwnedReadHalf, OwnedWriteHalf},
-    TcpSocket, TcpStream,
-};
+use proxy::packet_proxy::create_proxy;
+use tokio::net::TcpSocket;
 
 mod packet;
 mod packets;
+mod proxy;
 mod types;
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() {
+    loop {
+        tokio::task::spawn(packet_proxy());
+    }
+}
+
+async fn packet_proxy() -> io::Result<()> {
     let local_addr = "127.0.0.1:25566".parse().unwrap();
     let remote_addr = "127.0.0.1:25565";
 
@@ -26,203 +26,23 @@ async fn main() -> io::Result<()> {
     let listener = socket.listen(1024)?;
     println!("Waiting on {}", local_addr);
 
-    let mut tasks = Vec::new();
+    if let Ok((stream, addr)) = listener.accept().await {
+        println!("Starting proxy {} => {}", addr.to_string(), remote_addr);
+        let socket = TcpSocket::new_v4()?;
+        let remote_stream = socket
+            .connect(
+                remote_addr
+                    .parse()
+                    .map_err(|e| Error::new(io::ErrorKind::Other, e))?,
+            )
+            .await?;
 
-    for _ in 0..1024 {
-        if let Ok((stream, addr)) = listener.accept().await {
-            println!("Starting proxy {} => {}", addr.to_string(), remote_addr);
-            let socket = TcpSocket::new_v4()?;
-            let remote_stream = socket
-                .connect(
-                    remote_addr
-                        .parse()
-                        .map_err(|e| Error::new(io::ErrorKind::Other, e))?,
-                )
-                .await?;
-
-            tasks.push(tokio::task::spawn(create_proxy(stream, remote_stream)));
+        if let Err(e) = create_proxy(stream, remote_stream, None, None).await {
+            println!("Error, {:?}", e);
         }
-    }
-
-    for task in tasks {
-        let _ = task.await;
     }
 
     Ok(())
-}
-
-async fn create_proxy(mut local: TcpStream, mut remote: TcpStream) -> io::Result<()> {
-    // C→S: Handshake with Next State set to 2 (login)
-    let handshake = Packet::read_uncompressed(&mut local).await?;
-
-    let mut packet = Handshake::deserialize(&handshake).await?;
-    packet.server_port = 25565;
-
-    if packet.next_state.0 != 0x02 {
-        packet.serialize().write(&mut remote, None).await?;
-        return start_proxy(local, remote, State::Status, None).await;
-    }
-
-    packet.serialize().write(&mut remote, None).await?;
-
-    // C→S: Login Start
-    let login_start = Packet::read_uncompressed(&mut local).await?;
-    login_start.write(&mut remote).await?;
-
-    // S→C: Unknown
-    let unknown = Packet::read_uncompressed(&mut remote).await?;
-    unknown.write(&mut local).await?;
-
-    match unknown.packet_id.0 {
-        0x00 => Err(Error::new(io::ErrorKind::Other, "Disconnect")),
-        0x01 => Err(Error::new(io::ErrorKind::Other, "Encryption request")),
-        0x02 => start_proxy(local, remote, State::Transit, None).await,
-        0x03 => {
-            let compression = SetCompression::deserialize(&unknown).await?;
-
-            let login_success = Packet::read(&mut remote, Some(compression.threshold.0)).await?;
-            if login_success.packet_id().await?.0 != 0x02 {
-                return Err(Error::new(io::ErrorKind::Other, "Packet unknown"));
-            }
-            login_success
-                .write(&mut local, Some(compression.threshold.0))
-                .await?;
-            start_proxy(local, remote, State::Transit, Some(compression.threshold.0)).await
-        }
-        _ => Err(Error::new(io::ErrorKind::Other, "Packet unknown")),
-    }
-}
-
-async fn start_proxy(
-    local: TcpStream,
-    remote: TcpStream,
-    state: State,
-    compression: Option<i32>,
-) -> io::Result<()> {
-    let (local_reader, local_writer) = local.into_split();
-    let (remote_reader, remote_writer) = remote.into_split();
-
-    let server_bound_proxy = Proxy::new(
-        local_reader,
-        remote_writer,
-        Bound::Server,
-        state.clone(),
-        compression,
-    );
-    let client_bound_proxy = Proxy::new(
-        remote_reader,
-        local_writer,
-        Bound::Client,
-        state.clone(),
-        compression,
-    );
-
-    let server_task = tokio::task::spawn(server_bound_proxy.run());
-    let client_task = tokio::task::spawn(client_bound_proxy.run());
-
-    server_task.await??;
-    client_task.await??;
-
-    Ok(())
-}
-
-#[allow(dead_code)]
-#[derive(Clone, PartialEq, Eq)]
-enum State {
-    Handshake,
-    Status,
-    Login,
-    Transit,
-}
-
-#[derive(Debug)]
-enum Bound {
-    Server,
-    Client,
-}
-
-struct Proxy {
-    input: OwnedReadHalf,
-    output: OwnedWriteHalf,
-    bound: Bound,
-    state: State,
-    count: usize,
-    threshold: Option<i32>,
-}
-
-impl Proxy {
-    pub fn new(
-        input: OwnedReadHalf,
-        remote: OwnedWriteHalf,
-        bound: Bound,
-        state: State,
-        threshold: Option<i32>,
-    ) -> Self {
-        Proxy {
-            input,
-            output: remote,
-            bound,
-            state,
-            count: 0,
-            threshold,
-        }
-    }
-    pub async fn run(mut self) -> io::Result<()> {
-        loop {
-            let packet = Packet::read(&mut self.input, self.threshold).await?;
-            self.count += 1;
-
-            let packet = self.handle_packet(packet).await;
-            packet.write(&mut self.output, self.threshold).await?;
-        }
-    }
-
-    pub async fn handle_packet(&mut self, packet: Packet) -> Packet {
-        // println!("#{} {:?} => {:?}", self.count, &self.bound, &packet);
-
-        if let Packet::UnCompressed(packet) = packet {
-            let packet = match self.bound {
-                Bound::Server => self.handle_server_bound(packet).await,
-                Bound::Client => self.handle_cliend_bound(packet).await,
-            };
-            Packet::UnCompressed(packet)
-        } else {
-            packet
-        }
-    }
-
-    pub async fn handle_server_bound(&mut self, packet: UncompressedPacket) -> UncompressedPacket {
-        println!("#{} {:?} => {:?}", self.count, &self.bound, &packet);
-        match packet.packet_id.0 {
-            p if p == 0x04 && self.state == State::Transit => {
-                self.sb_0x04_chat_command(packet).await
-            }
-            _ => packet,
-        }
-    }
-
-    pub async fn handle_cliend_bound(&mut self, packet: UncompressedPacket) -> UncompressedPacket {
-        match packet.packet_id.0 {
-            p if p == 0x00 && self.state == State::Status => self.cb_0x00_status(packet).await,
-            _ => packet,
-        }
-    }
-
-    pub async fn cb_0x00_status(&mut self, packet: UncompressedPacket) -> UncompressedPacket {
-        let mut packet_reader = PacketReader::new(&packet);
-        println!(
-            "Server info: {}",
-            packet_reader.read_string().await.unwrap()
-        );
-        packet
-    }
-
-    pub async fn sb_0x04_chat_command(&mut self, packet: UncompressedPacket) -> UncompressedPacket {
-        if let Ok(chat_message) = ChatCommand::deserialize(&packet).await {
-            println!("Player send command: {}", chat_message.command);
-        }
-        packet
-    }
 }
 
 #[allow(dead_code)]
