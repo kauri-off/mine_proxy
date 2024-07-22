@@ -10,6 +10,7 @@ use crate::{
     packets::packets::{ChatCommand, Handshake, PacketActions, SetCompression, Status},
 };
 
+/// https://wiki.vg/Protocol#Login
 pub async fn create_proxy(
     mut local: TcpStream,
     mut remote: TcpStream,

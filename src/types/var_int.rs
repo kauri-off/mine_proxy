@@ -5,6 +5,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 const SEGMENT_BITS: i32 = 0x7F;
 const CONTINUE_BIT: i32 = 0x80;
 
+/// https://wiki.vg/Protocol#VarInt_and_VarLong
 #[derive(Clone, Debug)]
 pub struct VarInt(pub i32);
 
