@@ -9,14 +9,12 @@ const CONTINUE_BIT: i32 = 0x80;
 pub struct VarInt(pub i32);
 
 impl VarInt {
-    pub async fn read<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<(Self, usize)> {
+    pub async fn read<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Self> {
         let mut value: i32 = 0;
         let mut position: i32 = 0;
-        let mut count: usize = 0;
 
         loop {
             let current_byte = reader.read_u8().await? as i32;
-            count += 1;
 
             value |= (current_byte & SEGMENT_BITS) << position;
 
@@ -30,19 +28,17 @@ impl VarInt {
             }
         }
 
-        Ok((VarInt(value), count))
+        Ok(VarInt(value))
     }
 
-    pub fn read_sync<R: Read + Unpin>(reader: &mut R) -> io::Result<(Self, usize)> {
+    pub fn read_sync<R: Read + Unpin>(reader: &mut R) -> io::Result<Self> {
         let mut value: i32 = 0;
         let mut position: i32 = 0;
-        let mut count: usize = 0;
 
         loop {
             let mut buf = [0; 1];
             reader.read(&mut buf)?;
             let current_byte = buf[0] as i32;
-            count += 1;
 
             value |= (current_byte & SEGMENT_BITS) << position;
 
@@ -56,7 +52,7 @@ impl VarInt {
             }
         }
 
-        Ok((VarInt(value), count))
+        Ok(VarInt(value))
     }
 
     pub async fn write<W: AsyncWrite + Unpin>(self: &Self, writer: &mut W) -> io::Result<()> {

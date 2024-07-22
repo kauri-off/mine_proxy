@@ -216,7 +216,7 @@ impl Proxy {
 mod tests {
     use std::io::Write;
 
-    use tokio::io::AsyncReadExt;
+    use tokio::{fs::File, io::AsyncReadExt};
 
     use crate::{
         packet::{packet::Packet, packet_builder::PacketBuilder},
@@ -236,6 +236,22 @@ mod tests {
         let mut test2 = Vec::new();
         test2.write_all(&mut test).unwrap();
         assert_eq!(test, &test2);
+    }
+
+    #[tokio::test]
+    async fn zlib_test() {
+        let mut file = File::open("packets.bin").await.unwrap();
+        let mut packet = Vec::new();
+        file.read_to_end(&mut packet).await.unwrap();
+
+        let decompressed = Packet::decompress_data(&packet).await.unwrap();
+        let compressed = Packet::compress_data(&decompressed).await.unwrap();
+
+        let original_first = &packet[..100];
+        let compressed_first = &compressed[..100];
+
+        assert_eq!(original_first, compressed_first, "Data differs");
+        assert_eq!(packet.len(), compressed.len());
     }
 
     #[tokio::test]
@@ -292,7 +308,7 @@ mod tests {
 
         for test in tests {
             let mut stream = &test.var_int[..];
-            assert_eq!(VarInt::read_sync(&mut stream).unwrap().0 .0, test.int);
+            assert_eq!(VarInt::read_sync(&mut stream).unwrap().0, test.int);
         }
     }
 
@@ -334,7 +350,7 @@ mod tests {
 
         for test in tests {
             let mut stream = &test.var_int[..];
-            assert_eq!(VarInt::read(&mut stream).await.unwrap().0 .0, test.int);
+            assert_eq!(VarInt::read(&mut stream).await.unwrap().0, test.int);
         }
     }
 

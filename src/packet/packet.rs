@@ -1,12 +1,8 @@
-use std::io::{self, Write};
-
-use flate2::{
-    write::{ZlibDecoder, ZlibEncoder},
-    Compression,
-};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::io::{self, Cursor, Read, Write};
 
 use crate::types::var_int::VarInt;
+use flate2::{bufread::ZlibDecoder, write::ZlibEncoder, Compression};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub struct Packet {
     pub packet_id: VarInt,
@@ -18,7 +14,7 @@ impl Packet {
         reader: &mut R,
         threshold: Option<i32>,
     ) -> io::Result<Self> {
-        let (length, _offset) = VarInt::read(reader).await?;
+        let length = VarInt::read(reader).await?;
         let mut body = vec![0; length.0 as usize];
 
         reader.read_exact(&mut body).await?;
@@ -26,22 +22,18 @@ impl Packet {
         let body = match threshold {
             Some(_) => {
                 let mut stream = &body[..];
-                let (data_lenght, _offset) = VarInt::read(&mut stream).await?;
+                let data_lenght = VarInt::read(&mut stream).await?;
 
                 match data_lenght.0 {
                     0 => stream.to_vec(),
-                    _ => {
-                        let dcd = Packet::decompress_data(stream).await?;
-                        let cd = Packet::compress_data(&dcd).await?;
-                        dbg!(stream.len(), cd.len());
-                        dcd
-                    }
+                    _ => Packet::decompress_data(stream).await?,
                 }
             }
             None => body,
         };
+
         let mut stream = &body[..];
-        let (packet_id, _offset) = VarInt::read(&mut stream).await?;
+        let packet_id = VarInt::read(&mut stream).await?;
 
         let data = stream.to_vec();
 
@@ -87,15 +79,17 @@ impl Packet {
         Ok(())
     }
 
-    async fn compress_data(data: &[u8]) -> io::Result<Vec<u8>> {
-        let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
-        e.write_all(data)?;
-        e.finish()
+    pub async fn compress_data(data: &[u8]) -> io::Result<Vec<u8>> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(9));
+        encoder.write_all(data)?;
+        let compressed_data = encoder.finish()?;
+        Ok(compressed_data)
     }
 
-    async fn decompress_data(data: &[u8]) -> io::Result<Vec<u8>> {
-        let mut d = ZlibDecoder::new(Vec::new());
-        d.write_all(data)?;
-        d.finish()
+    pub async fn decompress_data(data: &[u8]) -> io::Result<Vec<u8>> {
+        let mut decoder = ZlibDecoder::new(Cursor::new(data));
+        let mut decompressed_data = Vec::new();
+        decoder.read_to_end(&mut decompressed_data)?;
+        Ok(decompressed_data)
     }
 }
