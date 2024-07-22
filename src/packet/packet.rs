@@ -1,12 +1,113 @@
-use std::io::{self, Cursor, Read, Write};
+use std::{
+    fmt::Debug,
+    io::{self, Cursor, Read, Write},
+};
 
 use crate::types::var_int::VarInt;
 use flate2::{bufread::ZlibDecoder, write::ZlibEncoder, Compression};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub struct Packet {
+pub enum Packet {
+    UnCompressed(UncompressedPacket),
+    Compressed(CompressedPacket),
+}
+
+impl Debug for Packet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Packet::UnCompressed(p) => write!(
+                f,
+                "UnCompressed, PacketID: {}, Len: {}",
+                p.packet_id.0,
+                p.data.len()
+            ),
+            Packet::Compressed(p) => write!(f, "Comressed, Data len: {}", p.body_len.0),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct CompressedPacket {
+    pub body_len: VarInt,
+    pub body: Vec<u8>, // PacketID + Data
+}
+
+impl CompressedPacket {
+    /// BodyLen + Body(PacketID + Data)
+    pub async fn pack(&self) -> io::Result<Vec<u8>> {
+        let mut body = Vec::new();
+        self.body_len.write(&mut body).await?;
+        body.extend(&self.body);
+
+        Ok(body)
+    }
+
+    /// Body(PacketID + Data) => Packet(packet_id, data)
+    pub async fn decompress(&self) -> io::Result<UncompressedPacket> {
+        let data = Packet::decompress_data(&self.body).await?;
+        let mut stream = &data[..];
+        UncompressedPacket::unpack(&mut stream).await
+    }
+
+    /// PacketLen + Body(data_len + data(packet_id + data)) => Stream
+    pub async fn write<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
+        let body = self.pack().await?;
+        VarInt(body.len() as i32).write(writer).await?;
+        writer.write_all(&body).await
+    }
+}
+
+#[derive(Debug)]
+pub struct UncompressedPacket {
     pub packet_id: VarInt,
     pub data: Vec<u8>,
+}
+
+impl UncompressedPacket {
+    /// Body(PacketID + data) => packet(packet_id, data)
+    pub async fn unpack<R: AsyncRead + Unpin>(body: &mut R) -> io::Result<Self> {
+        let packet_id = VarInt::read(body).await?;
+        let mut data = Vec::new();
+        body.read_to_end(&mut data).await?;
+
+        Ok(UncompressedPacket { packet_id, data })
+    }
+
+    /// packet(packet_id, data) => Body(PacketID + data)
+    pub async fn pack(&self) -> io::Result<Vec<u8>> {
+        let mut body = Vec::new();
+        self.packet_id.write(&mut body).await?;
+        body.extend(&self.data);
+
+        Ok(body)
+    }
+
+    /// packet(packet_id, data) => CompressedPacket
+    pub async fn compress(&self, threshold: i32) -> io::Result<CompressedPacket> {
+        let body = self.pack().await?;
+
+        if (body.len() as i32) < threshold {
+            Ok(CompressedPacket {
+                body_len: VarInt(0),
+                body,
+            })
+        } else {
+            let len = body.len();
+            let body = Packet::compress_data(&body).await?;
+            Ok(CompressedPacket {
+                body_len: VarInt(len as i32),
+                body,
+            })
+        }
+    }
+
+    /// PacketLen + Body(packet_id + data) => Stream
+    pub async fn write<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
+        let body = self.pack().await?;
+
+        VarInt(body.len() as i32).write(writer).await?;
+        writer.write_all(&body).await
+    }
 }
 
 impl Packet {
@@ -14,30 +115,48 @@ impl Packet {
         reader: &mut R,
         threshold: Option<i32>,
     ) -> io::Result<Self> {
+        match threshold {
+            Some(threshold) => Packet::read_compressed(reader, threshold).await,
+            None => Ok(Self::UnCompressed(Packet::read_uncompressed(reader).await?)),
+        }
+    }
+
+    pub async fn read_uncompressed<R: AsyncRead + Unpin>(
+        reader: &mut R,
+    ) -> io::Result<UncompressedPacket> {
+        let body = Packet::read_body(reader).await?;
+        let mut stream = &body[..];
+
+        UncompressedPacket::unpack(&mut stream).await
+    }
+
+    pub async fn read_compressed<R: AsyncRead + Unpin>(
+        reader: &mut R,
+        _threshold: i32,
+    ) -> io::Result<Self> {
+        let body = Packet::read_body(reader).await?;
+        let mut stream = &body[..];
+
+        let data_length = VarInt::read(&mut stream).await?;
+
+        match data_length.0 {
+            0 => Ok(Self::UnCompressed(
+                UncompressedPacket::unpack(&mut stream).await?,
+            )),
+            _ => Ok(Self::Compressed(CompressedPacket {
+                body_len: data_length,
+                body: stream.to_vec(),
+            })),
+        }
+    }
+
+    /// Read packet_len then read packet body
+    pub async fn read_body<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Vec<u8>> {
         let length = VarInt::read(reader).await?;
         let mut body = vec![0; length.0 as usize];
 
         reader.read_exact(&mut body).await?;
-
-        let body = match threshold {
-            Some(_) => {
-                let mut stream = &body[..];
-                let data_lenght = VarInt::read(&mut stream).await?;
-
-                match data_lenght.0 {
-                    0 => stream.to_vec(),
-                    _ => Packet::decompress_data(stream).await?,
-                }
-            }
-            None => body,
-        };
-
-        let mut stream = &body[..];
-        let packet_id = VarInt::read(&mut stream).await?;
-
-        let data = stream.to_vec();
-
-        Ok(Packet { packet_id, data })
+        Ok(body)
     }
 
     pub async fn write<W: AsyncWrite + Unpin>(
@@ -45,38 +164,20 @@ impl Packet {
         writer: &mut W,
         threshold: Option<i32>,
     ) -> io::Result<()> {
-        let mut data = Vec::new();
-        self.packet_id.write(&mut data).await?;
+        match self {
+            Packet::UnCompressed(uncompressed) => match threshold {
+                Some(t) => uncompressed.compress(t).await?.write(writer).await,
+                None => uncompressed.write(writer).await,
+            },
+            Packet::Compressed(compressed) => compressed.write(writer).await,
+        }
+    }
 
-        data.extend(&self.data);
-
-        let data = match threshold {
-            Some(threshold) => {
-                if data.len() as i32 >= threshold {
-                    let compressed_data = Packet::compress_data(&data).await?;
-
-                    let mut data = Vec::new();
-                    VarInt(compressed_data.len() as i32)
-                        .write(&mut data)
-                        .await?;
-                    data.extend(&compressed_data);
-
-                    data
-                } else {
-                    let mut buf = Vec::new();
-                    VarInt(0).write(&mut buf).await?;
-                    buf.extend(data);
-
-                    buf
-                }
-            }
-            None => data,
-        };
-
-        VarInt(data.len() as i32).write(writer).await?;
-        writer.write_all(&data).await?;
-
-        Ok(())
+    pub async fn packet_id(&self) -> io::Result<VarInt> {
+        match self {
+            Packet::UnCompressed(uncompressed) => Ok(uncompressed.packet_id.clone()),
+            Packet::Compressed(compressed) => Ok(compressed.decompress().await?.packet_id),
+        }
     }
 
     pub async fn compress_data(data: &[u8]) -> io::Result<Vec<u8>> {

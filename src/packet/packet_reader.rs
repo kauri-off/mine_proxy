@@ -2,14 +2,14 @@ use std::io::{self, Cursor, Error, ErrorKind, Read};
 
 use crate::types::{num::Integer, var_int::VarInt};
 
-use super::packet::Packet;
+use super::packet::UncompressedPacket;
 
 pub struct PacketReader {
     stream: Cursor<Vec<u8>>,
 }
 
 impl PacketReader {
-    pub fn new(packet: &Packet) -> Self {
+    pub fn new(packet: &UncompressedPacket) -> Self {
         let stream = Cursor::new(packet.data.clone());
         PacketReader { stream }
     }
@@ -28,10 +28,25 @@ impl PacketReader {
         String::from_utf8(stream).map_err(|e| Error::new(ErrorKind::InvalidData, e))
     }
 
-    pub async fn read_int<T: Integer>(&mut self) -> io::Result<T> {
+    pub fn read_int<T: Integer>(&mut self) -> io::Result<T> {
         let mut buf = vec![0; T::byte_len()];
         self.stream.read_exact(&mut buf)?;
 
         Ok(T::from_bytes(&buf))
+    }
+
+    pub fn read_bool(&mut self) -> io::Result<bool> {
+        let mut buf = [0u8; 1];
+        self.stream.read_exact(&mut buf)?;
+
+        match buf[0] {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(Error::new(ErrorKind::Other, "Not a bool")),
+        }
+    }
+
+    pub fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream.read(buf)
     }
 }
