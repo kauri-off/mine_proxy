@@ -117,3 +117,17 @@ impl Integer for u64 {
         std::mem::size_of::<Self>()
     }
 }
+
+impl Integer for u128 {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.to_be_bytes().to_vec()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        u128::from_be_bytes(bytes.try_into().unwrap())
+    }
+
+    fn byte_len() -> usize {
+        std::mem::size_of::<Self>()
+    }
+}

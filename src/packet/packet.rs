@@ -7,6 +7,7 @@ use crate::types::var_int::VarInt;
 use flate2::{bufread::ZlibDecoder, write::ZlibEncoder, Compression};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+#[derive(Clone)]
 pub enum Packet {
     UnCompressed(UncompressedPacket),
     Compressed(CompressedPacket),
@@ -26,7 +27,7 @@ impl Debug for Packet {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompressedPacket {
     pub body_len: VarInt,
     pub body: Vec<u8>, // PacketID + Data
@@ -57,7 +58,7 @@ impl CompressedPacket {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UncompressedPacket {
     pub packet_id: VarInt,
     pub data: Vec<u8>,

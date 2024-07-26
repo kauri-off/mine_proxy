@@ -49,7 +49,38 @@ impl PacketActions for Handshake {
     }
 }
 
+/// PacketID 0x00
+#[derive(Clone)]
+pub struct LoginStart {
+    pub packet_id: VarInt,
+    pub name: String,
+    pub uuid: u128,
+}
+
+impl PacketActions for LoginStart {
+    fn serialize(self) -> UncompressedPacket {
+        PacketBuilder::new(self.packet_id)
+            .write_string(self.name)
+            .write_int(self.uuid)
+            .build()
+    }
+
+    async fn deserialize(packet: &UncompressedPacket) -> io::Result<Self> {
+        let mut packet_reader = PacketReader::new(packet);
+
+        let name = packet_reader.read_string().await?;
+        let uuid: u128 = packet_reader.read_int()?;
+
+        Ok(LoginStart {
+            packet_id: packet.packet_id.clone(),
+            name,
+            uuid,
+        })
+    }
+}
+
 /// PacketID 0x03
+#[derive(Clone)]
 pub struct SetCompression {
     pub packet_id: VarInt,
     pub threshold: VarInt,

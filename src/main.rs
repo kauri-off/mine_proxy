@@ -1,6 +1,6 @@
 use std::io::{self, Error};
 
-use proxy::packet_proxy::create_proxy;
+use proxy::{packet_proxy::create_proxy, takker::start_takker};
 use tokio::net::TcpSocket;
 
 mod packet;
@@ -10,9 +10,7 @@ mod types;
 
 #[tokio::main]
 async fn main() {
-    loop {
-        tokio::task::spawn(packet_proxy());
-    }
+    start_takker().await.unwrap();
 }
 
 async fn packet_proxy() -> io::Result<()> {
