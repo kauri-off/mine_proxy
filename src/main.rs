@@ -8,9 +8,16 @@ mod packets;
 mod proxy;
 mod types;
 
-#[tokio::main]
-async fn main() {
-    start_takker().await.unwrap();
+fn main() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(16) // Увеличьте число потоков, если требуется
+        .enable_all()
+        .build()
+        .unwrap();
+
+    runtime.block_on(async {
+        start_takker().await.unwrap();
+    })
 }
 
 async fn packet_proxy() -> io::Result<()> {

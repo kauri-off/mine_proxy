@@ -80,7 +80,7 @@ impl PacketActions for LoginStart {
 }
 
 /// PacketID 0x03
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SetCompression {
     pub packet_id: VarInt,
     pub threshold: VarInt,

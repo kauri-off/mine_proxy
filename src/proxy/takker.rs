@@ -20,36 +20,48 @@ use crate::{packet::packet::Packet, packets::packets::Status, types::var_int::Va
 
 pub async fn start_takker() -> io::Result<()> {
     let proxy_config = ProxyConfig {
-        ip: "127.0.0.1".to_string(),
-        port: 25565,
+        remote_ip: IP {
+            ip: "89.33.12.126".to_string(),
+            port: 25565,
+        },
+        cheat_ip: IP {
+            ip: "127.0.0.1".to_string(),
+            port: 25566,
+        },
+        legit_ip: IP {
+            ip: "127.0.0.1".to_string(),
+            port: 25567,
+        },
+        hostname: "mc.funtime.su".to_string(),
         status: ProxyServerStatus {
             name: "Takker proxy".to_string(),
             protocol: "765".to_string(),
             description: "My implementation of takker".to_string(),
         },
     };
-    let mut cheat_config = proxy_config.clone();
-    cheat_config.port = 25566;
-    let mut legit_config = proxy_config.clone();
-    legit_config.port = 25567;
 
     let (ctx, crx) = mpsc::channel(32); // CheatTX, CheatRX
     let (ltx, lrx) = mpsc::channel(32); // LegitTX, LegitRX
-    tokio::spawn(wait_for_sockets(crx, lrx, proxy_config));
+    tokio::spawn(wait_for_sockets(crx, lrx, proxy_config.clone()));
 
-    let cheat_reader = tokio::spawn(read_port(ctx, cheat_config));
-    let legit_reader = tokio::spawn(read_port(ltx, legit_config));
+    let cheat_reader = tokio::spawn(read_port(
+        ctx,
+        proxy_config.cheat_ip.clone(),
+        proxy_config.status.clone(),
+    ));
+    let legit_reader = tokio::spawn(read_port(
+        ltx,
+        proxy_config.legit_ip.clone(),
+        proxy_config.status.clone(),
+    ));
 
-    cheat_reader.await??;
-    legit_reader.await??;
+    let _ = tokio::join!(cheat_reader, legit_reader);
 
     Ok(())
 }
 
-async fn read_port(tx: Sender<TcpStream>, proxy_config: ProxyConfig) -> io::Result<()> {
-    let proxy_addr = format!("{}:{}", proxy_config.ip, proxy_config.port)
-        .parse()
-        .unwrap();
+async fn read_port(tx: Sender<TcpStream>, ip: IP, status: ProxyServerStatus) -> io::Result<()> {
+    let proxy_addr = format!("{}:{}", ip.ip, ip.port).parse().unwrap();
 
     let tcp_socket = TcpSocket::new_v4()?;
     tcp_socket.set_reuseaddr(true)?;
@@ -60,11 +72,7 @@ async fn read_port(tx: Sender<TcpStream>, proxy_config: ProxyConfig) -> io::Resu
     loop {
         if let Ok((socket, _addr)) = listener.accept().await {
             println!("New connection from {}", _addr);
-            tokio::spawn(process_socket(
-                socket,
-                tx.clone(),
-                proxy_config.status.clone(),
-            ));
+            tokio::spawn(process_socket(socket, tx.clone(), status.clone()));
         }
     }
 }
@@ -90,9 +98,9 @@ async fn wait_for_sockets(
     proxy_config: ProxyConfig,
 ) {
     loop {
-        recieve_streams(&mut crx, &mut lrx, &proxy_config)
-            .await
-            .unwrap();
+        if let Err(e) = recieve_streams(&mut crx, &mut lrx, &proxy_config).await {
+            println!("Error, {:?}", e);
+        }
     }
 }
 
@@ -101,8 +109,14 @@ async fn recieve_streams(
     lrx: &mut Receiver<TcpStream>,
     proxy_config: &ProxyConfig,
 ) -> io::Result<()> {
-    let mut cheat_stream = crx.recv().await.unwrap();
-    let mut legit_stream = lrx.recv().await.unwrap();
+    let mut cheat_stream = crx
+        .recv()
+        .await
+        .ok_or(Error::new(io::ErrorKind::Other, "none"))?;
+    let mut legit_stream = lrx
+        .recv()
+        .await
+        .ok_or(Error::new(io::ErrorKind::Other, "none"))?;
 
     let socket1_packet = Packet::read_uncompressed(&mut cheat_stream).await?;
     let socket2_packet = Packet::read_uncompressed(&mut legit_stream).await?;
@@ -116,30 +130,34 @@ async fn recieve_streams(
     let remote_socket = TcpSocket::new_v4()?;
     let mut remote_stream = remote_socket
         .connect(
-            format!("{}:{}", proxy_config.ip.clone(), proxy_config.port)
-                .parse()
-                .unwrap(),
+            format!(
+                "{}:{}",
+                proxy_config.remote_ip.ip.clone(),
+                proxy_config.remote_ip.port
+            )
+            .parse()
+            .unwrap(),
         )
         .await?;
 
     let handshake = Handshake {
         packet_id: VarInt(0),
         protocol_version: VarInt(proxy_config.status.protocol.parse().unwrap()),
-        server_address: proxy_config.ip.clone(),
-        server_port: proxy_config.port,
+        server_address: proxy_config.hostname.clone(),
+        server_port: proxy_config.remote_ip.port,
         next_state: VarInt(0x02),
     }
     .serialize();
 
-    handshake.write(&mut remote_stream).await?;
+    handshake.write(&mut remote_stream).await?; // C→S: Handshake with Next State set to 2 (login)
     socket1_login_start
         .serialize()
         .write(&mut remote_stream)
-        .await?;
+        .await?; // C→S: Login Start
 
     let packet = Packet::read_uncompressed(&mut remote_stream).await?;
     let (compression, login_success) = match packet.packet_id.0 {
-        0x02 => (None, packet),
+        0x02 => (None, Packet::UnCompressed(packet)),
         0x03 => {
             let compression = SetCompression::deserialize(&packet).await?;
 
@@ -148,13 +166,13 @@ async fn recieve_streams(
             if login_success.packet_id().await?.0 != 0x02 {
                 return Err(Error::new(io::ErrorKind::Other, "Packet unknown"));
             }
-            (Some(compression), packet)
+            (Some(compression), login_success)
         }
         _ => return Err(Error::new(io::ErrorKind::Other, "Packet id error")),
     };
 
     if let Some(compression) = compression.clone() {
-        let compression = compression.serialize();
+        let compression = compression.serialize(); // S→C: Set Compression (optional)
         compression.write(&mut cheat_stream).await?;
         compression.write(&mut legit_stream).await?;
     }
@@ -164,7 +182,7 @@ async fn recieve_streams(
         None => None,
     };
 
-    let login_success = Packet::UnCompressed(login_success);
+    // S→C: Login Success
     login_success.write(&mut cheat_stream, threshold).await?;
     login_success.write(&mut legit_stream, threshold).await?;
 
@@ -175,44 +193,39 @@ async fn recieve_streams(
     let (tx, rx) = mpsc::channel(32);
 
     let read_from = Arc::new(Mutex::new(ReadFrom::Cheat));
-    let cheat2server = Client2Server::new(ReadFrom::Cheat, threshold, cheat_reader, tx.clone());
-    let legit2server = Client2Server::new(ReadFrom::Legit, threshold, legit_reader, tx.clone());
-    let server2client = Server2Client::new(remote_reader, cheat_writer, legit_writer, threshold);
+    let cheat2server = Client2Server::new(
+        ReadFrom::Cheat,
+        threshold,
+        cheat_reader,
+        tx.clone(),
+        read_from.clone(),
+    );
+    let legit2server = Client2Server::new(
+        ReadFrom::Legit,
+        threshold,
+        legit_reader,
+        tx.clone(),
+        read_from.clone(),
+    );
+    let server2client = Server2Client::new(
+        remote_reader,
+        cheat_writer,
+        legit_writer,
+        threshold,
+        read_from.clone(),
+    );
 
     let notify = Arc::new(Notify::new());
 
-    let notify_clone = notify.clone();
-    let read_from_state_clone = read_from.clone();
-    let cheat2server = tokio::spawn(async move {
-        tokio::select! {result = cheat2server.run(read_from_state_clone) => {
-            if let Err(_) = result {
-                println!("Error");
-                notify_clone.notify_waiters();
-            }
-        },
-        _ = notify_clone.notified() => {}
-        }
-    });
+    let cheat2server = tokio::spawn(cheat2server.run());
+    let legit2server = tokio::spawn(legit2server.run());
 
     let notify_clone = notify.clone();
-    let read_from_state_clone = read_from.clone();
-    let legit2server = tokio::spawn(async move {
-        tokio::select! {result = legit2server.run(read_from_state_clone) => {
-            if let Err(_) = result {
-                println!("Error");
-                notify_clone.notify_waiters();
-            }
-        },
-        _ = notify_clone.notified() => {}
-        }
-    });
-
-    let notify_clone = notify.clone();
-    let read_from_state_clone = read_from.clone();
     let server2client = tokio::spawn(async move {
-        tokio::select! {result = server2client.run(read_from_state_clone) => {
-            if let Err(_) = result {
-                println!("Error");
+        tokio::select! {
+        result = server2client.run() => {
+            if let Err(e) = result {
+                println!("Error in server2client, {:?}", e);
                 notify_clone.notify_waiters();
             }
         },
@@ -222,9 +235,10 @@ async fn recieve_streams(
 
     let notify_clone = notify.clone();
     let rx2server = tokio::spawn(async move {
-        tokio::select! {result = rx2server(rx, remote_writer, threshold) => {
-            if let Err(_) = result {
-                println!("Error");
+        tokio::select! {
+        result = rx2server(rx, remote_writer, threshold) => {
+            if let Err(e) = result {
+                println!("Error in rx2server, {:?}", e);
                 notify_clone.notify_waiters();
             }
         },
@@ -253,6 +267,7 @@ struct Server2Client {
     cheat_writer: Option<OwnedWriteHalf>,
     legit_writer: Option<OwnedWriteHalf>,
     threshold: Option<i32>,
+    read_from_state: Arc<Mutex<ReadFrom>>,
 }
 
 impl Server2Client {
@@ -261,23 +276,28 @@ impl Server2Client {
         cheat_writer: OwnedWriteHalf,
         legit_writer: OwnedWriteHalf,
         threshold: Option<i32>,
+        read_from_state: Arc<Mutex<ReadFrom>>,
     ) -> Self {
         Server2Client {
             remote_reader,
             cheat_writer: Some(cheat_writer),
             legit_writer: Some(legit_writer),
             threshold,
+            read_from_state,
         }
     }
 
-    async fn run(mut self, read_from_state: Arc<Mutex<ReadFrom>>) -> io::Result<()> {
+    async fn run(mut self) -> io::Result<()> {
         loop {
+            if self.cheat_writer.is_none() && self.legit_writer.is_none() {
+                return Err(Error::new(io::ErrorKind::Other, "all clients died"));
+            }
             let packet = Packet::read(&mut self.remote_reader, self.threshold).await?;
-            println!("Server | {:?}", packet);
+            // println!("Server | {:?}", packet);
 
             if let Some(ref mut cheat_writer) = self.cheat_writer {
                 if let Err(_) = packet.write(cheat_writer, self.threshold).await {
-                    let mut read_from = read_from_state.lock().await;
+                    let mut read_from = self.read_from_state.lock().await;
                     *read_from = ReadFrom::Legit;
                     self.cheat_writer = None;
                 }
@@ -297,6 +317,7 @@ struct Client2Server {
     threshold: Option<i32>,
     reader: OwnedReadHalf,
     tx: Sender<Packet>,
+    read_from_state: Arc<Mutex<ReadFrom>>,
 }
 
 impl Client2Server {
@@ -305,21 +326,23 @@ impl Client2Server {
         threshold: Option<i32>,
         reader: OwnedReadHalf,
         tx: Sender<Packet>,
+        read_from_state: Arc<Mutex<ReadFrom>>,
     ) -> Self {
         Client2Server {
             read_from,
             threshold,
             reader,
             tx,
+            read_from_state,
         }
     }
 
-    async fn run(mut self, read_from_state: Arc<Mutex<ReadFrom>>) -> io::Result<()> {
+    async fn run(mut self) -> io::Result<()> {
         loop {
             let packet = Packet::read(&mut self.reader, self.threshold).await?;
-            println!("{:?} | {:?}", self.read_from, packet);
+            // println!("{:?} | {:?}", self.read_from, packet);
 
-            let read_from = read_from_state.lock().await;
+            let read_from = self.read_from_state.lock().await;
             if read_from.deref() == &self.read_from {
                 drop(read_from);
                 self.tx
@@ -339,9 +362,17 @@ enum ReadFrom {
 
 #[derive(Clone)]
 struct ProxyConfig {
+    remote_ip: IP,
+    cheat_ip: IP,
+    legit_ip: IP,
+    hostname: String,
+    status: ProxyServerStatus,
+}
+
+#[derive(Clone)]
+struct IP {
     ip: String,
     port: u16,
-    status: ProxyServerStatus,
 }
 
 #[derive(Clone)]

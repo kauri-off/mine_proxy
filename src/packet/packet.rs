@@ -18,7 +18,7 @@ impl Debug for Packet {
         match self {
             Packet::UnCompressed(p) => write!(
                 f,
-                "UnCompressed, PacketID: {}, Len: {}",
+                "UnCompressed, PacketID: 0x{:x}, Len: {}",
                 p.packet_id.0,
                 p.data.len()
             ),
