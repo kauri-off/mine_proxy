@@ -21,7 +21,7 @@ use crate::{packet::packet::Packet, packets::packets::Status, types::var_int::Va
 pub async fn start_takker() -> io::Result<()> {
     let proxy_config = ProxyConfig {
         remote_ip: IP {
-            ip: "89.33.12.126".to_string(),
+            ip: "mc.funtime.su".to_string(),
             port: 25565,
         },
         cheat_ip: IP {
@@ -32,7 +32,6 @@ pub async fn start_takker() -> io::Result<()> {
             ip: "127.0.0.1".to_string(),
             port: 25567,
         },
-        hostname: "mc.funtime.su".to_string(),
         status: ProxyServerStatus {
             name: "Takker proxy".to_string(),
             protocol: "765".to_string(),
@@ -61,11 +60,9 @@ pub async fn start_takker() -> io::Result<()> {
 }
 
 async fn read_port(tx: Sender<TcpStream>, ip: IP, status: ProxyServerStatus) -> io::Result<()> {
-    let proxy_addr = format!("{}:{}", ip.ip, ip.port).parse().unwrap();
-
     let tcp_socket = TcpSocket::new_v4()?;
     tcp_socket.set_reuseaddr(true)?;
-    tcp_socket.bind(proxy_addr)?;
+    tcp_socket.bind(ip.pack().parse().unwrap())?;
 
     let listener = tcp_socket.listen(32)?;
 
@@ -127,23 +124,12 @@ async fn recieve_streams(
         socket1_login_start.name, socket1_login_start.uuid
     );
 
-    let remote_socket = TcpSocket::new_v4()?;
-    let mut remote_stream = remote_socket
-        .connect(
-            format!(
-                "{}:{}",
-                proxy_config.remote_ip.ip.clone(),
-                proxy_config.remote_ip.port
-            )
-            .parse()
-            .unwrap(),
-        )
-        .await?;
+    let mut remote_stream = TcpStream::connect(proxy_config.remote_ip.pack()).await?;
 
     let handshake = Handshake {
         packet_id: VarInt(0),
         protocol_version: VarInt(proxy_config.status.protocol.parse().unwrap()),
-        server_address: proxy_config.hostname.clone(),
+        server_address: proxy_config.remote_ip.ip.clone(),
         server_port: proxy_config.remote_ip.port,
         next_state: VarInt(0x02),
     }
@@ -365,7 +351,6 @@ struct ProxyConfig {
     remote_ip: IP,
     cheat_ip: IP,
     legit_ip: IP,
-    hostname: String,
     status: ProxyServerStatus,
 }
 
@@ -373,6 +358,12 @@ struct ProxyConfig {
 struct IP {
     ip: String,
     port: u16,
+}
+
+impl IP {
+    fn pack(&self) -> String {
+        format!("{}:{}", self.ip.clone(), self.port)
+    }
 }
 
 #[derive(Clone)]
